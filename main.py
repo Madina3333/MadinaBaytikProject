@@ -39,7 +39,7 @@ async def main():
     await init_db()
 
     # Получаем токен из переменных окружения или из .env файла
-    bot_token = os.getenv("BOT_TOKEN")
+    bot_token = "8392047086:AAFzV8yBbHOqxxgkXuohjDUVEUQH03TWdh4"
     if not bot_token:
         raise ValueError(
             "BOT_TOKEN не установлен!\n"
@@ -72,3 +72,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
