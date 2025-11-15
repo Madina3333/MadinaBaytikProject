@@ -3,53 +3,70 @@ import os
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import BotCommand
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-from models import Base  # твои модели
+from dotenv import load_dotenv
+from models import Base, User
 
-# === Настройка БД (всё в одном месте) ===
-DATABASE_URL = "sqlite+aiosqlite:///./dating.db"
+# Загрузка переменных окружения (опционально, если файл .env существует)
+load_dotenv()
+
+# Настройки БД
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data.db")
 engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
-# Асинхронная функция, которая создает все таблицы, описанные в моделях
+# Middleware для передачи сессии в хендлеры
+class DBSessionMiddleware:
+    async def __call__(self, handler, event, data):
+        async with AsyncSessionLocal() as session:
+            data["session"] = session
+            return await handler(event, data)
+
+
+# Инициализация БД
 async def init_db():
-    # Открываем транзакцию на уровне подключения
     async with engine.begin() as conn:
-        # Выполняем синхронную функцию создания таблиц (run_async оборачивает sync-код в async)
         await conn.run_sync(Base.metadata.create_all)
 
 
-class DBSessionMiddleware():
-    class DBSessionMiddleware:
-        # Метод __cal__ вызывается при каждом обновлении от tg
-        async def __cal__(self, handler, event, data):
-            # Автоматически открываем сессию на время обработки запроса
-            async with AsyncSessionLocal() as session:
-                # Передаем сесию в контекст хендлера через словарь daata
-                data["session"] = session
-                # Вызываем сам хендлер (следующий шаг в цепочке)
-                return await handler(event, data)
 
 
-# Главная асинхронная функция
 async def main():
+    os.makedirs("photos", exist_ok=True)
     await init_db()
+
+    # Получаем токен из переменных окружения или из .env файла
+    bot_token = os.getenv("BOT_TOKEN")
+    if not bot_token:
+        raise ValueError(
+            "BOT_TOKEN не установлен!\n"
+            "Установите токен одним из способов:\n"
+            "1. Создайте файл .env с содержимым: BOT_TOKEN=your_token_here\n"
+            "2. Или установите переменную окружения: set BOT_TOKEN=your_token_here (Windows)\n"
+            "3. Или экспортируйте переменную: export BOT_TOKEN=your_token_here (Linux/Mac)"
+        )
+    
     bot = Bot(
-        token="8392047086:AAFzV8yBbHOqxxgkXuohjDUVEUQH03TWdh4",
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML)  # Включаем HTML - разметку по кмолчанию
+        token=bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
-    # создаем диспетчер - центральный маршрутизатор событий
+
+    await bot.set_my_commands([
+        BotCommand(command="/start", description="Главное меню"),
+        BotCommand(command="/next", description="Следующая анкета"),
+        BotCommand(command="/matches", description="Мои матчи")
+    ])
+
     dp = Dispatcher()
-    # Подключаем middleware: теперь во всех хендлерах будет доступна сессия БД
     dp.update.middleware(DBSessionMiddleware())
+
     from handlers import registration, swiping
-    # Регистрируем роутеры в диспетчере
     dp.include_router(registration.router)
     dp.include_router(swiping.router)
 
-    # Запускаем бота в режиме long polling
     await dp.start_polling(bot)
 
 

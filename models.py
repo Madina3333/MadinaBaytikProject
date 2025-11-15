@@ -7,23 +7,27 @@ from sqlalchemy.orm import sessionmaker
 Base = declarative_base()
 class User(Base):
     __tablename__ = 'users'
-    id = Column(Integer, primary_key = True, autoincrement=False) #tg user_id
-    name = Column(String, nullable = False)
-    photo_path = Column(String, nullable = False)
-    bio = Column(String, nullable = False)
+    id = Column(Integer, primary_key=True, autoincrement=False)  # Telegram ID
+    username = Column(String(32))  # Может быть NULL
+    name = Column(String(100), nullable=False)
+    photo_path = Column(String(255), nullable=False)
+    bio = Column(String(500), nullable=False)
 
 class Swipes(Base):
     __tablename__ = 'swipes'
     id = Column(Integer, primary_key = True)
-    swiper_id = Column(Integer, ForeignKey('user.id', ondelete = "CASCADE"), nullable = False)
-    target_id = Column(Integer, ForeignKey('user.id', ondelete="CASCADE"), nullable=False)
+    swiper_id = Column(Integer, ForeignKey('users.id', ondelete = "CASCADE"), nullable = False)
+    target_id = Column(Integer, ForeignKey('users.id', ondelete="CASCADE"), nullable=False)
 
     liked = Column(Boolean, nullable = False)
+    
+    # Уникальное ограничение: один пользователь может свайпнуть другого только один раз
+    __table_args__ = (UniqueConstraint('swiper_id', 'target_id', name='unique_swipe'),)
 
 class Match(Base):
     __tablename__ = 'matches'
 
     id = Column(Integer, primary_key = True)
-    user1_id = Column(Integer, ForeignKey('user.id', ondelete = "CASCADE"), nullable = False)
-    user2_id = Column(Integer, ForeignKey('user.id', ondelete = "CASCADE"), nullable = False)
+    user1_id = Column(Integer, ForeignKey('users.id', ondelete = "CASCADE"), nullable = False)
+    user2_id = Column(Integer, ForeignKey('users.id', ondelete = "CASCADE"), nullable = False)
 

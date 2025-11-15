@@ -1,106 +1,129 @@
-#Импортируем Router — контейнер для хендлеров
-from aiogram import Router
-
-# Импортируем фильтры и типы событий
-from aiogram.types import Message
-
-# Импортируем FSM (Finite State Machine) для управления состояниями
+from aiogram import Router, F
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-
-# Импортируем асинхронную сессию SQLAlchemy (будет передаваться через middleware)
 from sqlalchemy.ext.asyncio import AsyncSession
-
-# Импортируем модель User для работы с БД
 from models import User
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.photo import download_photo
 
-# Импортируем утилиту для скачивания фото
-from ..utils.photo import download_photo
-
-
-#Создаем роутер - он будет зарегестрирован в main.py
 router = Router()
-# Определяем состояния регистрации (пошаговый ввод данных)
+
 class Reg(StatesGroup):
-    waiting_for_name = State()    # Шаг 1: ожидаем имя
-    waiting_for_photo = State()   # Шаг 2: ожидаем фото
-    waiting_for_bio = State()     # Шаг 3: ожидаем описание
+    waiting_for_name = State()
+    waiting_for_photo = State()
+    waiting_for_bio = State()
 
+@router.message(F.text == "/start")
+async def cmd_start(message: Message, session: AsyncSession, state: FSMContext):
+    # Очищаем состояние FSM при старте
+    await state.clear()
+    
+    user = await session.get(User, message.from_user.id)
+    description = "👋 Добро пожаловать в бот знакомств!\n\n❤️ Лайкай анкеты и находи единомышленников."
+    if user:
+        text = description + "\n✅ Ты уже зарегистрирован!"
+        keyboard = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="🔄 Изменить анкету")],
+                [KeyboardButton(text="👥 Смотреть анкеты (/next)")],
+                [KeyboardButton(text="💌 Мои матчи")],
+            ],
+            resize_keyboard=True
+        )
+        await message.answer(text, reply_markup=keyboard)
+    else:
+        text = description + "\n📝 Создай анкету, чтобы начать!"
+        keyboard = ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="✍️ Создать анкету")]],
+            resize_keyboard=True
+        )
+        await message.answer(text, reply_markup=keyboard)
 
-# Хендлер на команду /start
-@router.message(lambda message: message.text == "/start")
-async def cmd_start(message: Message, state: FSMContext):
-    # Отправляем приветствие и просим имя
-    await message.answer("👋 Привет! Как тебя зовут?")
-    # Устанавливаем состояние: теперь бот ждёт имя
+@router.message(F.text == "✍️ Создать анкету")
+async def start_registration(message: Message, state: FSMContext):
+    await message.answer("Как тебя зовут?", reply_markup=None)
     await state.set_state(Reg.waiting_for_name)
 
+@router.message(F.text == "🔄 Изменить анкету")
+async def edit_profile(message: Message, state: FSMContext):
+    await message.answer("Хорошо! Как тебя зовут?", reply_markup=None)
+    await state.set_state(Reg.waiting_for_name)
 
-# Хендлер для получения имени (работает ТОЛЬКО в состоянии waiting_for_name)
+@router.message(F.text == "👥 Смотреть анкеты (/next)")
+async def view_profiles(message: Message, session: AsyncSession):
+    from .swiping import show_next_profile
+    await show_next_profile(message, session)
+
+@router.message(F.text == "💌 Мои матчи")
+async def view_matches(message: Message, session: AsyncSession):
+    from .swiping import show_matches
+    await show_matches(message, session)
+
 @router.message(Reg.waiting_for_name)
 async def process_name(message: Message, state: FSMContext):
-    # Сохраняем имя в данные FSM (временное хранилище)
     await state.update_data(name=message.text.strip())
-    # Просим отправить фото
     await message.answer("Отлично! Теперь отправь своё фото.")
-    # Переходим к следующему состоянию
     await state.set_state(Reg.waiting_for_photo)
 
-
-# Хендлер для получения фото (работает ТОЛЬКО в состоянии waiting_for_photo)
-@router.message(Reg.waiting_for_photo, lambda msg: msg.photo is not None)
+@router.message(Reg.waiting_for_photo, F.photo)
 async def process_photo(message: Message, state: FSMContext, bot, session: AsyncSession):
-    # Берём самое большое фото из массива (Telegram присылает несколько размеров)
-    photo = message.photo[-1]
     user_id = message.from_user.id
-
-    # Получаем сохранённое ранее имя из FSM
-    user_data = await state.get_data()
-    name = user_data["name"]
+    telegram_username = message.from_user.username
+    name = (await state.get_data()).get("name", "Аноним")
 
     try:
-        # Скачиваем фото и получаем локальный путь (например: "photos/123456789.jpg")
-        photo_path = await download_photo(bot, photo.file_id, user_id)
-    except Exception as e:
+        photo_path = await download_photo(bot, message.photo[-1].file_id, user_id)
+    except Exception:
         await message.answer("❌ Не удалось сохранить фото. Попробуй другое.")
         return
 
-    # Создаём объект пользователя и сохраняем в БД
-    new_user = User(
-        id=user_id,
-        name=name,
-        photo_path=photo_path,
-        bio=""  # Временно пустое — заполним на следующем шаге
-    )
-    session.add(new_user)
-    await session.commit()  # Сохраняем изменения
+    existing_user = await session.get(User, user_id)
+    if existing_user:
+        existing_user.name = name
+        existing_user.username = telegram_username
+        existing_user.photo_path = photo_path
+        existing_user.bio = ""
+        await session.commit()
+    else:
+        new_user = User(
+            id=user_id,
+            username=telegram_username,
+            name=name,
+            photo_path=photo_path,
+            bio=""
+        )
+        session.add(new_user)
+        await session.commit()
 
-    # Сохраняем путь к фото в FSM (на случай, если bio не пройдёт)
-    await state.update_data(photo_path=photo_path)
-
-    # Просим описание
     await message.answer("📸 Фото сохранено! Напиши немного о себе (до 500 символов):")
     await state.set_state(Reg.waiting_for_bio)
 
+@router.message(Reg.waiting_for_photo)
+async def handle_not_photo(message: Message):
+    await message.answer("📸 Пожалуйста, отправь именно фотографию.")
 
-# Хендлер для получения описания (работает ТОЛЬКО в состоянии waiting_for_bio)
 @router.message(Reg.waiting_for_bio)
 async def process_bio(message: Message, state: FSMContext, session: AsyncSession):
     user_id = message.from_user.id
-    # Ограничиваем описание 500 символами и убираем лишние пробелы
     bio = message.text.strip()[:500]
-
-    # Находим пользователя в БД и обновляем bio
-    existing_user = await session.get(User, user_id)
-    if existing_user:
-        existing_user.bio = bio
+    user = await session.get(User, user_id)
+    if user:
+        user.bio = bio
         await session.commit()
-        await message.answer("✅ Профиль создан! Теперь ты можешь смотреть анкеты.")
+        
+        # Возвращаем правильную клавиатуру для зарегистрированного пользователя
+        keyboard = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="🔄 Изменить анкету")],
+                [KeyboardButton(text="👥 Смотреть анкеты (/next)")],
+                [KeyboardButton(text="💌 Мои матчи")],
+            ],
+            resize_keyboard=True
+        )
+        await message.answer("✅ Профиль обновлён! Напиши /next, чтобы смотреть анкеты.", reply_markup=keyboard)
     else:
-        await message.answer("⚠️ Ошибка: пользователь не найден. Начни с /start.")
-
-    # Завершаем FSM — очищаем состояние
+        await message.answer("⚠️ Ошибка. Начни с /start.")
     await state.clear()
-
-
-
