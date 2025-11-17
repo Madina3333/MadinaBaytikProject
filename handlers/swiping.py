@@ -9,6 +9,7 @@ from aiogram.types import (
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from models import User, Swipes, Match
+import logging
 
 router = Router()
 
@@ -132,7 +133,7 @@ async def show_next_profile(message: Message, session: AsyncSession):
 @router.callback_query(F.data.startswith("like_"))
 async def handle_like(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()  # Подтверждаем обработку callback
-    
+
     target_id = int(callback.data.split("_")[1])
     swiper_id = callback.from_user.id
     chat_id = callback.message.chat.id
@@ -145,7 +146,7 @@ async def handle_like(callback: CallbackQuery, session: AsyncSession):
         )
     )
     existing = existing_swipe.scalar_one_or_none()
-    
+
     if existing:
         # Обновляем существующий свайп
         existing.liked = True
@@ -153,7 +154,7 @@ async def handle_like(callback: CallbackQuery, session: AsyncSession):
         # Создаем новый свайп
         swipe = Swipes(swiper_id=swiper_id, target_id=target_id, liked=True)
         session.add(swipe)
-    
+
     await session.commit()
     # Обновляем сессию, чтобы изменения были видны в следующем запросе
     session.expire_all()
@@ -166,9 +167,10 @@ async def handle_like(callback: CallbackQuery, session: AsyncSession):
         await callback.message.delete()
     except Exception:
         pass  # Игнорируем ошибки при удалении
-    
+
     # Отправляем следующую анкету
     await send_next_profile(callback.bot, chat_id, swiper_id, session)
+
 
 
 @router.callback_query(F.data.startswith("dislike_"))

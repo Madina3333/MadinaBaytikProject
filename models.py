@@ -30,4 +30,3 @@ class Match(Base):
     id = Column(Integer, primary_key = True)
     user1_id = Column(Integer, ForeignKey('users.id', ondelete = "CASCADE"), nullable = False)
     user2_id = Column(Integer, ForeignKey('users.id', ondelete = "CASCADE"), nullable = False)
-
