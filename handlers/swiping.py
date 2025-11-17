@@ -9,7 +9,6 @@ from aiogram.types import (
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from models import User, Swipes, Match
-import logging
 
 router = Router()
 
@@ -56,6 +55,34 @@ async def send_next_profile(bot: Bot, chat_id: int, user_id: int, session: Async
     )
 
 
+async def send_like_notification(bot: Bot, target_user_id: int, liker_user: User, session: AsyncSession):
+    """Отправляет уведомление пользователю, что его лайкнули"""
+    # Проверяем, что пользователь не лайкал того, кто лайкнул его
+    stmt = select(Swipes).where(
+        Swipes.swiper_id == target_user_id,
+        Swipes.target_id == liker_user.id,
+        Swipes.liked == True  # Пользователь уже лайкнул
+    )
+    result = await session.execute(stmt)
+    already_liked = result.scalar_one_or_none()
+
+    if not already_liked:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="❤️ Лайк в ответ", callback_data=f"like_back_{liker_user.id}"),
+                InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip_like_{liker_user.id}")
+            ]
+        ])
+        photo = FSInputFile(liker_user.photo_path)
+        await bot.send_photo(
+            chat_id=target_user_id,
+            photo=photo,
+            caption=f"❤️ <b>{liker_user.name}</b> лайкнул(-а) тебя!\n{liker_user.bio}",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+
+
 async def check_match(session: AsyncSession, user1_id: int, user2_id: int, bot: Bot) -> bool:
     if user1_id == user2_id:
         return False
@@ -73,7 +100,20 @@ async def check_match(session: AsyncSession, user1_id: int, user2_id: int, bot: 
     r1 = await session.execute(stmt1)
     r2 = await session.execute(stmt2)
 
-    if r1.scalar() and r2.scalar():
+    swipe1 = r1.scalar_one_or_none()
+    swipe2 = r2.scalar_one_or_none()
+
+    if swipe1 and swipe2:  # Взаимный лайк
+        # Проверяем, не создан ли уже матч
+        existing_match = await session.execute(
+            select(Match).where(
+                (Match.user1_id == min(user1_id, user2_id)) &
+                (Match.user2_id == max(user1_id, user2_id))
+            )
+        )
+        if existing_match.scalar_one_or_none():
+            return True  # Уже есть матч
+
         match = Match(
             user1_id=min(user1_id, user2_id),
             user2_id=max(user1_id, user2_id)
@@ -104,6 +144,17 @@ async def check_match(session: AsyncSession, user1_id: int, user2_id: int, bot: 
             parse_mode="HTML"
         )
         return True
+    elif swipe2 and not swipe1:  # Только второй пользователь лайкнул первого
+        # Отправляем уведомление первому пользователю
+        liker_user = await session.get(User, user2_id)
+        if liker_user:
+            await send_like_notification(bot, user1_id, liker_user, session)
+    elif swipe1 and not swipe2:  # Только первый пользователь лайкнул второго
+        # Отправляем уведомление второму пользователю
+        liker_user = await session.get(User, user1_id)
+        if liker_user:
+            await send_like_notification(bot, user2_id, liker_user, session)
+
     return False
 
 
@@ -133,7 +184,7 @@ async def show_next_profile(message: Message, session: AsyncSession):
 @router.callback_query(F.data.startswith("like_"))
 async def handle_like(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()  # Подтверждаем обработку callback
-
+    
     target_id = int(callback.data.split("_")[1])
     swiper_id = callback.from_user.id
     chat_id = callback.message.chat.id
@@ -146,7 +197,7 @@ async def handle_like(callback: CallbackQuery, session: AsyncSession):
         )
     )
     existing = existing_swipe.scalar_one_or_none()
-
+    
     if existing:
         # Обновляем существующий свайп
         existing.liked = True
@@ -154,7 +205,7 @@ async def handle_like(callback: CallbackQuery, session: AsyncSession):
         # Создаем новый свайп
         swipe = Swipes(swiper_id=swiper_id, target_id=target_id, liked=True)
         session.add(swipe)
-
+    
     await session.commit()
     # Обновляем сессию, чтобы изменения были видны в следующем запросе
     session.expire_all()
@@ -167,10 +218,9 @@ async def handle_like(callback: CallbackQuery, session: AsyncSession):
         await callback.message.delete()
     except Exception:
         pass  # Игнорируем ошибки при удалении
-
+    
     # Отправляем следующую анкету
     await send_next_profile(callback.bot, chat_id, swiper_id, session)
-
 
 
 @router.callback_query(F.data.startswith("dislike_"))
@@ -248,3 +298,47 @@ async def button_next(message: Message, session: AsyncSession):
 @router.message(F.text == "💌 Мои матчи")
 async def button_matches(message: Message, session: AsyncSession):
     await show_matches(message, session)
+
+
+# Новые обработчики для уведомлений о лайках
+@router.callback_query(F.data.startswith("like_back_"))
+async def handle_like_back(callback: CallbackQuery, session: AsyncSession):
+    await callback.answer()
+    target_id = int(callback.data.split("_")[2])
+    swiper_id = callback.from_user.id
+
+    # Проверяем, не существует ли уже свайп
+    existing_swipe = await session.execute(
+        select(Swipes).where(
+            Swipes.swiper_id == swiper_id,
+            Swipes.target_id == target_id
+        )
+    )
+    existing = existing_swipe.scalar_one_or_none()
+    
+    if existing:
+        existing.liked = True
+    else:
+        swipe = Swipes(swiper_id=swiper_id, target_id=target_id, liked=True)
+        session.add(swipe)
+    
+    await session.commit()
+    session.expire_all()
+
+    # Проверяем матч
+    await check_match(session, swiper_id, target_id, callback.bot)
+
+    # Удаляем уведомление
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("skip_like_"))
+async def handle_skip_like(callback: CallbackQuery, session: AsyncSession):
+    await callback.answer()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass  # Игнорируем ошибки при удалении
