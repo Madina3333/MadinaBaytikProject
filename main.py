@@ -13,7 +13,7 @@ from models import Base, User
 load_dotenv()
 
 # Настройки БД
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./dataa.db")
 engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 

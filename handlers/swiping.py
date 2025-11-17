@@ -16,13 +16,13 @@ router = Router()
 async def get_next_profile(session: AsyncSession, current_user_id: int):
     # Очищаем кэш сессии, чтобы видеть последние изменения после commit
     session.expire_all()
-    
+
     # Получаем все ID пользователей, которых уже свайпнули
     stmt = select(Swipes.target_id).where(Swipes.swiper_id == current_user_id)
     result = await session.execute(stmt)
     swiped_ids = {row[0] for row in result}
     swiped_ids.add(current_user_id)  # не показывать себя
-    
+
     # Выбираем пользователя, которого еще не свайпнули
     # Используем NOT IN для исключения всех просмотренных
     stmt = select(User).where(
@@ -38,7 +38,7 @@ async def send_next_profile(bot: Bot, chat_id: int, user_id: int, session: Async
     if not profile:
         await bot.send_message(chat_id, "🚫 Больше анкет нет. Загляни позже!")
         return
-    
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="❤️ Лайк", callback_data=f"like_{profile.id}"),
@@ -184,7 +184,7 @@ async def show_next_profile(message: Message, session: AsyncSession):
 @router.callback_query(F.data.startswith("like_"))
 async def handle_like(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()  # Подтверждаем обработку callback
-    
+
     target_id = int(callback.data.split("_")[1])
     swiper_id = callback.from_user.id
     chat_id = callback.message.chat.id
@@ -197,7 +197,7 @@ async def handle_like(callback: CallbackQuery, session: AsyncSession):
         )
     )
     existing = existing_swipe.scalar_one_or_none()
-    
+
     if existing:
         # Обновляем существующий свайп
         existing.liked = True
@@ -205,7 +205,7 @@ async def handle_like(callback: CallbackQuery, session: AsyncSession):
         # Создаем новый свайп
         swipe = Swipes(swiper_id=swiper_id, target_id=target_id, liked=True)
         session.add(swipe)
-    
+
     await session.commit()
     # Обновляем сессию, чтобы изменения были видны в следующем запросе
     session.expire_all()
@@ -218,7 +218,7 @@ async def handle_like(callback: CallbackQuery, session: AsyncSession):
         await callback.message.delete()
     except Exception:
         pass  # Игнорируем ошибки при удалении
-    
+
     # Отправляем следующую анкету
     await send_next_profile(callback.bot, chat_id, swiper_id, session)
 
@@ -226,7 +226,7 @@ async def handle_like(callback: CallbackQuery, session: AsyncSession):
 @router.callback_query(F.data.startswith("dislike_"))
 async def handle_dislike(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()  # Подтверждаем обработку callback
-    
+
     target_id = int(callback.data.split("_")[1])
     swiper_id = callback.from_user.id
     chat_id = callback.message.chat.id
@@ -239,7 +239,7 @@ async def handle_dislike(callback: CallbackQuery, session: AsyncSession):
         )
     )
     existing = existing_swipe.scalar_one_or_none()
-    
+
     if existing:
         # Обновляем существующий свайп
         existing.liked = False
@@ -247,7 +247,7 @@ async def handle_dislike(callback: CallbackQuery, session: AsyncSession):
         # Создаем новый свайп
         swipe = Swipes(swiper_id=swiper_id, target_id=target_id, liked=False)
         session.add(swipe)
-    
+
     await session.commit()
     # Обновляем сессию, чтобы изменения были видны в следующем запросе
     session.expire_all()
@@ -257,7 +257,7 @@ async def handle_dislike(callback: CallbackQuery, session: AsyncSession):
         await callback.message.delete()
     except Exception:
         pass  # Игнорируем ошибки при удалении
-    
+
     # Отправляем следующую анкету
     await send_next_profile(callback.bot, chat_id, swiper_id, session)
 
@@ -295,6 +295,7 @@ async def show_matches(message: Message, session: AsyncSession):
 async def button_next(message: Message, session: AsyncSession):
     await show_next_profile(message, session)
 
+
 @router.message(F.text == "💌 Мои матчи")
 async def button_matches(message: Message, session: AsyncSession):
     await show_matches(message, session)
@@ -315,20 +316,30 @@ async def handle_like_back(callback: CallbackQuery, session: AsyncSession):
         )
     )
     existing = existing_swipe.scalar_one_or_none()
-    
+
     if existing:
-        existing.liked = True
+        # Если свайп существует, но пользователь не лайкал ранее (dislike), обновляем на like
+        if not existing.liked:
+            existing.liked = True
     else:
+        # Создаем новый свайп
         swipe = Swipes(swiper_id=swiper_id, target_id=target_id, liked=True)
         session.add(swipe)
-    
+
     await session.commit()
     session.expire_all()
 
     # Проверяем матч
     await check_match(session, swiper_id, target_id, callback.bot)
 
-    # Удаляем уведомление
+    # Отправляем подтверждение
+    await callback.message.edit_caption(
+        caption=f"✅ Вы лайкнули <b>{(await session.get(User, target_id)).name}</b> в ответ!",
+        parse_mode="HTML",
+        reply_markup=None
+    )
+
+    # После небольшой задержки удаляем сообщение
     try:
         await callback.message.delete()
     except Exception:
@@ -336,8 +347,9 @@ async def handle_like_back(callback: CallbackQuery, session: AsyncSession):
 
 
 @router.callback_query(F.data.startswith("skip_like_"))
-async def handle_skip_like(callback: CallbackQuery, session: AsyncSession):
+async def handle_skip_like(callback: CallbackQuery):
     await callback.answer()
+    # Просто удаляем сообщение
     try:
         await callback.message.delete()
     except Exception:
