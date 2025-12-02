@@ -69,8 +69,8 @@ async def send_like_notification(bot: Bot, target_user_id: int, liker_user: User
     if not already_liked:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="❤️ Лайк в ответ", callback_data=f"like_back_{liker_user.id}"),
-                InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip_like_{liker_user.id}")
+                InlineKeyboardButton(text="❤️ Лайк в ответ", callback_data=f"like-back_{liker_user.id}"),
+                InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip-like_{liker_user.id}")
             ]
         ])
         photo = FSInputFile(liker_user.photo_path)
@@ -186,6 +186,7 @@ async def handle_like(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()  # Подтверждаем обработку callback
 
     target_id = int(callback.data.split("_")[1])
+    print(target_id)
     swiper_id = callback.from_user.id
     chat_id = callback.message.chat.id
 
@@ -302,10 +303,11 @@ async def button_matches(message: Message, session: AsyncSession):
 
 
 # Новые обработчики для уведомлений о лайках
-@router.callback_query(F.data.startswith("like_back_"))
+@router.callback_query(F.data.startswith("like-back_"))
 async def handle_like_back(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()
-    target_id = int(callback.data.split("_")[2])
+    target_id = int(callback.data.split("_")[1])
+    print(target_id)
     swiper_id = callback.from_user.id
 
     # Проверяем, не существует ли уже свайп
@@ -346,7 +348,7 @@ async def handle_like_back(callback: CallbackQuery, session: AsyncSession):
         pass
 
 
-@router.callback_query(F.data.startswith("skip_like_"))
+@router.callback_query(F.data.startswith("skip-like_"))
 async def handle_skip_like(callback: CallbackQuery):
     await callback.answer()
     # Просто удаляем сообщение

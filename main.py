@@ -13,7 +13,7 @@ from models import Base, User
 load_dotenv()
 
 # Настройки БД
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./dataa.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data.db")
 engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -67,7 +67,7 @@ async def main():
     dp.include_router(registration.router)
     dp.include_router(swiping.router)
 
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, skip_updates=False)
 
 
 if __name__ == "__main__":
