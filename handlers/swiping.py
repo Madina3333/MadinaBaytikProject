@@ -172,6 +172,7 @@ async def show_next_profile(message: Message, session: AsyncSession):
             InlineKeyboardButton(text="🚫 Не лайк", callback_data=f"dislike_{profile.id}")
         ]
     ])
+    print(profile.photo_path)
     photo = FSInputFile(profile.photo_path)
     await message.answer_photo(
         photo=photo,
