@@ -29,62 +29,72 @@ async def get_next_profile(session, current_user_id: int):
     current_user = await session.get(User, current_user_id)
     if not current_user:
         print("❌ Текущий пользователь не найден")
-        return None
+        return None, False
 
+    # Получаем уже свайпнутых
     swiped_result = await session.execute(
         select(Swipes.target_id).where(Swipes.swiper_id == current_user_id)
     )
     swiped_ids = {row[0] for row in swiped_result}
     swiped_ids.add(current_user_id)
 
-    candidates_result = await session.execute(
+    # Все кандидаты
+    all_candidates_result = await session.execute(
         select(User).where(User.id.notin_(swiped_ids))
     )
-    candidates = [u for u in candidates_result.scalars().all() if u.interests]
+    all_candidates = list(all_candidates_result.scalars().all())
+    if not all_candidates:
+        print("📭 Нет доступных анкет")
+        return None, False
 
-    if not candidates:
-        # Fallback: все кандидаты (даже без интересов)
-        candidates_result = await session.execute(
-            select(User).where(User.id.notin_(swiped_ids))
-        )
-        candidates = list(candidates_result.scalars().all())
-        if candidates:
-            fallback = random.choice(candidates)
-            print(f"🎲 Fallback (нет интересов): выбран {fallback.name} (ID={fallback.id})")
-            return fallback
-        return None
+    # Если у текущего нет интересов — сразу fallback
+    if not current_user.interests:
+        print("⚠️ У текущего пользователя нет интересов → fallback")
+        chosen = random.choice(all_candidates)
+        return chosen, True
 
-    # Ранжируем по Жаккару
-    if current_user.interests:
-        similarities = []
-        for candidate in candidates:
-            if candidate.interests:
-                score = jaccard_similarity(current_user.interests, candidate.interests)
-                similarities.append((score, candidate))
-                print(f"   → {candidate.name} (ID={candidate.id}): интересы = '{candidate.interests}', схожесть = {score:.3f}")
+    # Сравниваем по интересам
+    similarities = []
+    for candidate in all_candidates:
+        if candidate.interests:
+            score = jaccard_similarity(current_user.interests, candidate.interests)
+            similarities.append((score, candidate))
+            print(
+                f"   → {candidate.name} (ID={candidate.id}): интересы = '{candidate.interests}', схожесть = {score:.3f}")
+        else:
+            # Кандидат без интересов — схожесть 0
+            similarities.append((0.0, candidate))
+            print(f"   → {candidate.name} (ID={candidate.id}): интересы отсутствуют, схожесть = 0.000")
 
-        if similarities:
-            similarities.sort(key=lambda x: x[0], reverse=True)
-            best = similarities[0][1]
-            print(f"🎯 Выбран по интересам: {best.name} (ID={best.id}) | схожесть = {similarities[0][0]:.3f}")
-            return best
+    # Находим максимум
+    max_score = max(score for score, _ in similarities)
 
-    # Fallback на случайный выбор
-    fallback = random.choice(candidates)
-    print(f"🔀 Fallback: выбран {fallback.name} (ID={fallback.id})")
-    return fallback
+    if max_score == 0.0:
+        print("📉 Все схожести = 0 → показываем случайную анкету")
+        chosen = random.choice(all_candidates)
+        return chosen, True
+    else:
+        best_candidates = [cand for score, cand in similarities if score == max_score]
+        chosen = random.choice(best_candidates)
+        print(f"🎯 Выбран: {chosen.name} (ID={chosen.id}) | схожесть = {max_score:.3f}")
+        return chosen, False
 
 
 async def send_next_profile(bot: Bot, chat_id: int, user_id: int, session: AsyncSession):
-    profile = await get_next_profile(session, user_id)
+    profile, show_fallback_message = await get_next_profile(session, user_id)
     if not profile:
         await bot.send_message(chat_id, "🚫 Больше анкет нет. Загляни позже!")
         return
 
     if not os.path.exists(profile.photo_path):
-        logger.warning(f"Фото отсутствует: {profile.photo_path}, пропускаем")
+        # Рекурсивно пробуем другого (защита от битых фото)
         await send_next_profile(bot, chat_id, user_id, session)
         return
+
+    # 🌟 Добавляем сообщение, если совпадений нет
+    caption = f"<b>{profile.name}</b>\n{profile.bio}"
+    if show_fallback_message:
+        caption = "📭 Новых совпадений пока нет, но эта анкета может вас заинтересовать!\n\n" + caption
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❤️ Лайк", callback_data=f"like_{profile.id}")],
@@ -94,7 +104,7 @@ async def send_next_profile(bot: Bot, chat_id: int, user_id: int, session: Async
     await bot.send_photo(
         chat_id=chat_id,
         photo=photo,
-        caption=f"<b>{profile.name}</b>\n{profile.bio}",
+        caption=caption,
         reply_markup=kb,
         parse_mode="HTML"
     )
