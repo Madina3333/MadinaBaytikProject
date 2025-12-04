@@ -1,3 +1,4 @@
+# handlers/swiping.py
 from aiogram import Router, F, Bot
 from aiogram.types import (
     Message,
@@ -6,73 +7,72 @@ from aiogram.types import (
     InlineKeyboardButton,
     FSInputFile
 )
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup, any_state  # ← any_state — это объект, не аргумент!
+from aiogram.filters import StateFilter
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from models import User, Swipes, Match
 import asyncio
+import os
+import random
 import logging
 
-from utils.mistral import get_embedding, cosine_similarity
+from utils.mistral import jaccard_similarity
 
 router = Router()
 logger = logging.getLogger(__name__)
 
 
-async def get_next_profile(session: AsyncSession, current_user_id: int):
+async def get_next_profile(session, current_user_id: int):
     session.expire_all()
-
     current_user = await session.get(User, current_user_id)
     if not current_user:
+        print("❌ Текущий пользователь не найден")
         return None
 
-    stmt = select(Swipes.target_id).where(Swipes.swiper_id == current_user_id)
-    result = await session.execute(stmt)
-    swiped_ids = {row[0] for row in result}
+    swiped_result = await session.execute(
+        select(Swipes.target_id).where(Swipes.swiper_id == current_user_id)
+    )
+    swiped_ids = {row[0] for row in swiped_result}
     swiped_ids.add(current_user_id)
 
-    stmt = select(User).where(
-        User.id.notin_(swiped_ids) if swiped_ids else User.id != current_user_id
+    candidates_result = await session.execute(
+        select(User).where(User.id.notin_(swiped_ids))
     )
-    result = await session.execute(stmt)
-    candidates = list(result.scalars().all())
+    candidates = [u for u in candidates_result.scalars().all() if u.interests]
 
     if not candidates:
+        # Fallback: все кандидаты (даже без интересов)
+        candidates_result = await session.execute(
+            select(User).where(User.id.notin_(swiped_ids))
+        )
+        candidates = list(candidates_result.scalars().all())
+        if candidates:
+            fallback = random.choice(candidates)
+            print(f"🎲 Fallback (нет интересов): выбран {fallback.name} (ID={fallback.id})")
+            return fallback
         return None
 
-    current_bio = (current_user.bio or "").strip()
-    if not current_bio:
-        return candidates[0]
-
-    fallback_candidate = candidates[0]
-
-    try:
-        current_embedding = await get_embedding(current_bio)
-
-        candidates_with_bio = [u for u in candidates if (u.bio or "").strip()]
-        if not candidates_with_bio:
-            return fallback_candidate
-
-        bio_list = [(u, (u.bio or "").strip()) for u in candidates_with_bio]
-        tasks = [get_embedding(bio) for _, bio in bio_list]
-        embeddings = await asyncio.gather(*tasks, return_exceptions=True)
-
+    # Ранжируем по Жаккару
+    if current_user.interests:
         similarities = []
-        for (user, _), emb in zip(bio_list, embeddings):
-            if isinstance(emb, Exception):
-                logger.warning(f"Ошибка получения embedding для пользователя {user.id}: {emb}")
-                continue
-            sim = cosine_similarity(current_embedding, emb)
-            similarities.append((sim, user))
+        for candidate in candidates:
+            if candidate.interests:
+                score = jaccard_similarity(current_user.interests, candidate.interests)
+                similarities.append((score, candidate))
+                print(f"   → {candidate.name} (ID={candidate.id}): интересы = '{candidate.interests}', схожесть = {score:.3f}")
 
         if similarities:
             similarities.sort(key=lambda x: x[0], reverse=True)
-            return similarities[0][1]
+            best = similarities[0][1]
+            print(f"🎯 Выбран по интересам: {best.name} (ID={best.id}) | схожесть = {similarities[0][0]:.3f}")
+            return best
 
-        return fallback_candidate
-
-    except Exception as e:
-        logger.error(f"Ошибка при ранжировании через Mistral: {e}")
-        return fallback_candidate
+    # Fallback на случайный выбор
+    fallback = random.choice(candidates)
+    print(f"🔀 Fallback: выбран {fallback.name} (ID={fallback.id})")
+    return fallback
 
 
 async def send_next_profile(bot: Bot, chat_id: int, user_id: int, session: AsyncSession):
@@ -81,11 +81,14 @@ async def send_next_profile(bot: Bot, chat_id: int, user_id: int, session: Async
         await bot.send_message(chat_id, "🚫 Больше анкет нет. Загляни позже!")
         return
 
+    if not os.path.exists(profile.photo_path):
+        logger.warning(f"Фото отсутствует: {profile.photo_path}, пропускаем")
+        await send_next_profile(bot, chat_id, user_id, session)
+        return
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="❤️ Лайк", callback_data=f"like_{profile.id}"),
-            InlineKeyboardButton(text="🚫 Не лайк", callback_data=f"dislike_{profile.id}")
-        ]
+        [InlineKeyboardButton(text="❤️ Лайк", callback_data=f"like_{profile.id}")],
+        [InlineKeyboardButton(text="🚫 Не лайк", callback_data=f"dislike_{profile.id}")]
     ])
     photo = FSInputFile(profile.photo_path)
     await bot.send_photo(
@@ -108,79 +111,64 @@ async def send_like_notification(bot: Bot, target_user_id: int, liker_user: User
 
     if not already_liked:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="❤️ Лайк в ответ", callback_data=f"like-back_{liker_user.id}"),
-                InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip-like_{liker_user.id}")
-            ]
+            [InlineKeyboardButton(text="❤️ Лайк в ответ", callback_data=f"like-back_{liker_user.id}")],
+            [InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip-like_{liker_user.id}")]
         ])
-        photo = FSInputFile(liker_user.photo_path)
-        await bot.send_photo(
-            chat_id=target_user_id,
-            photo=photo,
-            caption=f"❤️ <b>{liker_user.name}</b> лайкнул(-а) тебя!\n{liker_user.bio}",
-            reply_markup=kb,
-            parse_mode="HTML"
-        )
+        if os.path.exists(liker_user.photo_path):
+            photo = FSInputFile(liker_user.photo_path)
+            await bot.send_photo(
+                chat_id=target_user_id,
+                photo=photo,
+                caption=f"❤️ <b>{liker_user.name}</b> лайкнул(-а) тебя!\n{liker_user.bio}",
+                reply_markup=kb,
+                parse_mode="HTML"
+            )
 
 
 async def check_match(session: AsyncSession, user1_id: int, user2_id: int, bot: Bot) -> bool:
     if user1_id == user2_id:
         return False
 
-    stmt1 = select(Swipes).where(
-        Swipes.swiper_id == user1_id,
-        Swipes.target_id == user2_id,
-        Swipes.liked == True
-    )
-    stmt2 = select(Swipes).where(
-        Swipes.swiper_id == user2_id,
-        Swipes.target_id == user1_id,
-        Swipes.liked == True
-    )
+    stmt1 = select(Swipes).where(Swipes.swiper_id == user1_id, Swipes.target_id == user2_id, Swipes.liked == True)
+    stmt2 = select(Swipes).where(Swipes.swiper_id == user2_id, Swipes.target_id == user1_id, Swipes.liked == True)
     r1 = await session.execute(stmt1)
     r2 = await session.execute(stmt2)
-
     swipe1 = r1.scalar_one_or_none()
     swipe2 = r2.scalar_one_or_none()
 
     if swipe1 and swipe2:
-        existing_match = await session.execute(
+        # Проверяем, не создан ли матч
+        match_exists = await session.execute(
             select(Match).where(
                 (Match.user1_id == min(user1_id, user2_id)) &
                 (Match.user2_id == max(user1_id, user2_id))
             )
         )
-        if existing_match.scalar_one_or_none():
-            return True
+        if not match_exists.scalar_one_or_none():
+            match = Match(user1_id=min(user1_id, user2_id), user2_id=max(user1_id, user2_id))
+            session.add(match)
+            await session.commit()
 
-        match = Match(
-            user1_id=min(user1_id, user2_id),
-            user2_id=max(user1_id, user2_id)
-        )
-        session.add(match)
-        await session.commit()
-        session.expire_all()
+            user1 = await session.get(User, user1_id)
+            user2 = await session.get(User, user2_id)
+            if user1 and user2:
+                link2 = f"@{user2.username}" if user2.username else f"tg://user?id={user2.id}"
+                link1 = f"@{user1.username}" if user1.username else f"tg://user?id={user1.id}"
 
-        user1 = await session.get(User, user1_id)
-        user2 = await session.get(User, user2_id)
-
-        photo2 = FSInputFile(user2.photo_path)
-        link1 = f"@{user2.username}" if user2.username else f"tg://user?id={user2.id}"
-        await bot.send_photo(
-            user1_id,
-            photo=photo2,
-            caption=f"💌 У вас взаимный лайк с <b>{user2.name}</b>!\n{user2.bio}\n\nНаписать: {link1}",
-            parse_mode="HTML"
-        )
-
-        photo1 = FSInputFile(user1.photo_path)
-        link2 = f"@{user1.username}" if user1.username else f"tg://user?id={user1.id}"
-        await bot.send_photo(
-            user2_id,
-            photo=photo1,
-            caption=f"💌 У вас взаимный лайк с <b>{user1.name}</b>!\n{user1.bio}\n\nНаписать: {link2}",
-            parse_mode="HTML"
-        )
+                if os.path.exists(user2.photo_path):
+                    await bot.send_photo(
+                        user1_id,
+                        photo=FSInputFile(user2.photo_path),
+                        caption=f"💌 У вас взаимный лайк с <b>{user2.name}</b>!\n{user2.bio}\n\nНаписать: {link2}",
+                        parse_mode="HTML"
+                    )
+                if os.path.exists(user1.photo_path):
+                    await bot.send_photo(
+                        user2_id,
+                        photo=FSInputFile(user1.photo_path),
+                        caption=f"💌 У вас взаимный лайк с <b>{user1.name}</b>!\n{user1.bio}\n\nНаписать: {link1}",
+                        parse_mode="HTML"
+                    )
         return True
     elif swipe2 and not swipe1:
         liker_user = await session.get(User, user2_id)
@@ -190,31 +178,12 @@ async def check_match(session: AsyncSession, user1_id: int, user2_id: int, bot: 
         liker_user = await session.get(User, user1_id)
         if liker_user:
             await send_like_notification(bot, user2_id, liker_user, session)
-
     return False
 
 
-@router.message(F.text == "/next")
+@router.message(F.text == "/next", StateFilter("*"))
 async def show_next_profile(message: Message, session: AsyncSession):
-    user_id = message.from_user.id
-    profile = await get_next_profile(session, user_id)
-    if not profile:
-        await message.answer("🚫 Больше анкет нет. Загляни позже!")
-        return
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="❤️ Лайк", callback_data=f"like_{profile.id}"),
-            InlineKeyboardButton(text="🚫 Не лайк", callback_data=f"dislike_{profile.id}")
-        ]
-    ])
-    photo = FSInputFile(profile.photo_path)
-    await message.answer_photo(
-        photo=photo,
-        caption=f"<b>{profile.name}</b>\n{profile.bio}",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
+    await send_next_profile(message.bot, message.chat.id, message.from_user.id, session)
 
 
 @router.callback_query(F.data.startswith("like_"))
@@ -222,33 +191,26 @@ async def handle_like(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()
     target_id = int(callback.data.split("_")[1])
     swiper_id = callback.from_user.id
-    chat_id = callback.message.chat.id
 
-    existing_swipe = await session.execute(
-        select(Swipes).where(
-            Swipes.swiper_id == swiper_id,
-            Swipes.target_id == target_id
-        )
+    existing = await session.execute(
+        select(Swipes).where(Swipes.swiper_id == swiper_id, Swipes.target_id == target_id)
     )
-    existing = existing_swipe.scalar_one_or_none()
+    swipe = existing.scalar_one_or_none()
 
-    if existing:
-        existing.liked = True
+    if swipe:
+        swipe.liked = True
     else:
-        swipe = Swipes(swiper_id=swiper_id, target_id=target_id, liked=True)
-        session.add(swipe)
-
+        session.add(Swipes(swiper_id=swiper_id, target_id=target_id, liked=True))
     await session.commit()
-    session.expire_all()
 
+    # ✅ Вызываем напрямую — без импорта!
     await check_match(session, swiper_id, target_id, callback.bot)
 
     try:
         await callback.message.delete()
-    except Exception:
+    except:
         pass
-
-    await send_next_profile(callback.bot, chat_id, swiper_id, session)
+    await send_next_profile(callback.bot, callback.message.chat.id, swiper_id, session)
 
 
 @router.callback_query(F.data.startswith("dislike_"))
@@ -256,39 +218,29 @@ async def handle_dislike(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()
     target_id = int(callback.data.split("_")[1])
     swiper_id = callback.from_user.id
-    chat_id = callback.message.chat.id
 
-    existing_swipe = await session.execute(
-        select(Swipes).where(
-            Swipes.swiper_id == swiper_id,
-            Swipes.target_id == target_id
-        )
+    existing = await session.execute(
+        select(Swipes).where(Swipes.swiper_id == swiper_id, Swipes.target_id == target_id)
     )
-    existing = existing_swipe.scalar_one_or_none()
+    swipe = existing.scalar_one_or_none()
 
-    if existing:
-        existing.liked = False
+    if swipe:
+        swipe.liked = False
     else:
-        swipe = Swipes(swiper_id=swiper_id, target_id=target_id, liked=False)
-        session.add(swipe)
-
+        session.add(Swipes(swiper_id=swiper_id, target_id=target_id, liked=False))
     await session.commit()
-    session.expire_all()
 
     try:
         await callback.message.delete()
-    except Exception:
+    except:
         pass
+    await send_next_profile(callback.bot, callback.message.chat.id, swiper_id, session)
 
-    await send_next_profile(callback.bot, chat_id, swiper_id, session)
 
-
-@router.message(F.text == "/matches")
+@router.message(F.text == "/matches", StateFilter("*"))
 async def show_matches(message: Message, session: AsyncSession):
     user_id = message.from_user.id
-    stmt = select(Match).where(
-        (Match.user1_id == user_id) | (Match.user2_id == user_id)
-    )
+    stmt = select(Match).where((Match.user1_id == user_id) | (Match.user2_id == user_id))
     result = await session.execute(stmt)
     matches = result.scalars().all()
 
@@ -299,24 +251,21 @@ async def show_matches(message: Message, session: AsyncSession):
     for match in matches:
         partner_id = match.user2_id if match.user1_id == user_id else match.user1_id
         partner = await session.get(User, partner_id)
-        if partner:
-            photo = FSInputFile(partner.photo_path)
+        if partner and os.path.exists(partner.photo_path):
             link = f"@{partner.username}" if partner.username else f"tg://user?id={partner.id}"
             await message.answer_photo(
-                photo=photo,
+                FSInputFile(partner.photo_path),
                 caption=f"💌 Матч с: <b>{partner.name}</b>\n{partner.bio}\n\nНаписать: {link}",
                 parse_mode="HTML"
             )
-        else:
-            await message.answer(f"💌 Матч с пользователем {partner_id} (анкета удалена)")
 
 
-@router.message(F.text == "👥 Смотреть анкеты (/next)")
+@router.message(F.text == "👥 Смотреть анкеты (/next)", StateFilter("*"))
 async def button_next(message: Message, session: AsyncSession):
     await show_next_profile(message, session)
 
 
-@router.message(F.text == "💌 Мои матчи")
+@router.message(F.text == "💌 Мои матчи", StateFilter("*"))
 async def button_matches(message: Message, session: AsyncSession):
     await show_matches(message, session)
 
@@ -327,36 +276,23 @@ async def handle_like_back(callback: CallbackQuery, session: AsyncSession):
     target_id = int(callback.data.split("_")[1])
     swiper_id = callback.from_user.id
 
-    existing_swipe = await session.execute(
-        select(Swipes).where(
-            Swipes.swiper_id == swiper_id,
-            Swipes.target_id == target_id
-        )
+    existing = await session.execute(
+        select(Swipes).where(Swipes.swiper_id == swiper_id, Swipes.target_id == target_id)
     )
-    existing = existing_swipe.scalar_one_or_none()
+    swipe = existing.scalar_one_or_none()
 
-    if existing:
-        if not existing.liked:
-            existing.liked = True
+    if swipe:
+        swipe.liked = True
     else:
-        swipe = Swipes(swiper_id=swiper_id, target_id=target_id, liked=True)
-        session.add(swipe)
-
+        session.add(Swipes(swiper_id=swiper_id, target_id=target_id, liked=True))
     await session.commit()
-    session.expire_all()
 
     await check_match(session, swiper_id, target_id, callback.bot)
 
-    target_user = await session.get(User, target_id)
-    await callback.message.edit_caption(
-        caption=f"✅ Вы лайкнули <b>{target_user.name}</b> в ответ!",
-        parse_mode="HTML",
-        reply_markup=None
-    )
-
+    await callback.message.edit_caption(caption="✅ Лайк отправлен!", reply_markup=None)
     try:
         await callback.message.delete()
-    except Exception:
+    except:
         pass
 
 
@@ -365,5 +301,5 @@ async def handle_skip_like(callback: CallbackQuery):
     await callback.answer()
     try:
         await callback.message.delete()
-    except Exception:
+    except:
         pass

@@ -1,52 +1,63 @@
 # utils/mistral.py
 import os
 import httpx
-import math
-from typing import List
+from typing import List, Optional
 
 MISTRAL_API_KEY = "9K6hr7S7RwzCFgCddK7MJ4T3FuFP089s"
-EMBEDDING_MODEL = "mistral-embed"
-MISTRAL_API_URL = "https://api.mistral.ai/v1/embeddings"
+CHAT_MODEL = "mistral-large-latest"  # или "open-mistral-7b" для бесплатного
 
-
-async def get_embedding(text: str) -> List[float]:
-
+async def extract_interests_from_bio(bio: str) -> Optional[str]:
+    """
+    Отправляет bio в Mistral Chat и получает список интересов через запятую.
+    Пример ответа: "программирование, Python, нейросети, open-source"
+    """
     if not MISTRAL_API_KEY:
-        raise ValueError("MISTRAL_API_KEY не установлен. Проверьте файл .env")
+        print("❌ MISTRAL_API_KEY не задан")
+        return None
 
-    text = text[:2000].strip()
-    if not text:
-        text = " "
+    prompt = (
+        f"Извлеки до 5 ключевых интересов пользователя из текста ниже. "
+        f"Ответь только списком слов или коротких фраз через запятую, без пояснений.\n\n"
+        f"Текст: {bio}"
+    )
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(
-            MISTRAL_API_URL,
-            headers={
-                "Authorization": f"Bearer {MISTRAL_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": EMBEDDING_MODEL,
-                "input": text,
-            }
-        )
-        if response.status_code != 200:
-            raise RuntimeError(f"Mistral API error: {response.status_code} – {response.text}")
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(
+                "https://api.mistral.ai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {MISTRAL_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": CHAT_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 100,
+                    "temperature": 0.3,
+                },
+            )
+            if response.status_code == 200:
+                data = response.json()
+                interests = data["choices"][0]["message"]["content"].strip()
+                # Очистка от лишнего
+                interests = interests.split("\n")[0]  # только первая строка
+                interests = interests.replace(".", "").strip()
+                print(f"✅ Interests extracted: {interests}")
+                return interests
+            else:
+                print(f"❌ Mistral Chat error {response.status_code}: {response.text}")
+                return None
+    except Exception as e:
+        print(f"❌ Ошибка при извлечении интересов: {e}")
+        return None
 
-        data = response.json()
-        return data["data"][0]["embedding"]
 
-
-def cosine_similarity(a: List[float], b: List[float]) -> float:
-
-    if len(a) != len(b):
-        raise ValueError("Векторы должны быть одинаковой длины")
-
-    dot_product = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-
-    if norm_a == 0 or norm_b == 0:
+def jaccard_similarity(interests1: str, interests2: str) -> float:
+    """Сравнивает два списка интересов через коэффициент Жаккара."""
+    if not interests1 or not interests2:
         return 0.0
-
-    return dot_product / (norm_a * norm_b)
+    set1 = set(tag.strip().lower() for tag in interests1.split(",") if tag.strip())
+    set2 = set(tag.strip().lower() for tag in interests2.split(",") if tag.strip())
+    if not set1 or not set2:
+        return 0.0
+    return len(set1 & set2) / len(set1 | set2)
