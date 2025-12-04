@@ -6,7 +6,7 @@ from sqlalchemy import (
     Boolean,
     ForeignKey,
     UniqueConstraint,
-    JSON
+    JSON, Integer
 )
 from sqlalchemy.ext.declarative import declarative_base
 
@@ -25,16 +25,15 @@ class User(Base):
 
 class Swipes(Base):
     __tablename__ = 'swipes'
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)  # ← INTEGER + autoincrement
     swiper_id = Column(BigInteger, ForeignKey('users.id', ondelete="CASCADE"), nullable=False)
     target_id = Column(BigInteger, ForeignKey('users.id', ondelete="CASCADE"), nullable=False)
     liked = Column(Boolean, nullable=False)
     __table_args__ = (UniqueConstraint('swiper_id', 'target_id', name='unique_swipe'),)
 
-
 class Match(Base):
     __tablename__ = 'matches'
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)  # ← тоже INTEGER
     user1_id = Column(BigInteger, ForeignKey('users.id', ondelete="CASCADE"), nullable=False)
     user2_id = Column(BigInteger, ForeignKey('users.id', ondelete="CASCADE"), nullable=False)
     __table_args__ = (UniqueConstraint('user1_id', 'user2_id', name='unique_match'),)
