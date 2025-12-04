@@ -7,10 +7,6 @@ MISTRAL_API_KEY = "9K6hr7S7RwzCFgCddK7MJ4T3FuFP089s"
 CHAT_MODEL = "mistral-large-latest"  # или "open-mistral-7b" для бесплатного
 
 async def extract_interests_from_bio(bio: str) -> Optional[str]:
-    """
-    Отправляет bio в Mistral Chat и получает список интересов через запятую.
-    Пример ответа: "программирование, Python, нейросети, open-source"
-    """
     if not MISTRAL_API_KEY:
         print("❌ MISTRAL_API_KEY не задан")
         return None
@@ -53,7 +49,6 @@ async def extract_interests_from_bio(bio: str) -> Optional[str]:
 
 
 def jaccard_similarity(interests1: str, interests2: str) -> float:
-    """Сравнивает два списка интересов через коэффициент Жаккара."""
     if not interests1 or not interests2:
         return 0.0
     set1 = set(tag.strip().lower() for tag in interests1.split(",") if tag.strip())
