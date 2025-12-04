@@ -18,7 +18,6 @@ class Reg(StatesGroup):
 
 @router.message(F.text == "/start")
 async def cmd_start(message: Message, session: AsyncSession, state: FSMContext):
-    # Очищаем состояние FSM при старте
     await state.clear()
     
     user = await session.get(User, message.from_user.id)
@@ -114,7 +113,6 @@ async def process_bio(message: Message, state: FSMContext, session: AsyncSession
         user.bio = bio
         await session.commit()
         
-        # Возвращаем правильную клавиатуру для зарегистрированного пользователя
         keyboard = ReplyKeyboardMarkup(
             keyboard=[
                 [KeyboardButton(text="🔄 Изменить анкету")],
